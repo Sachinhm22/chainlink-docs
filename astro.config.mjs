@@ -12,10 +12,6 @@ export default defineConfig({
           label: 'Chainlink Functions',
           items: [
             { label: 'Overview', slug: 'functions' },
-            { label: 'Architecture', slug: 'functions/architecture' },
           ],
         },
       ],
-    }),
-  ],
-});
