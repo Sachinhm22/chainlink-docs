@@ -7,6 +7,10 @@ export default defineConfig({
     starlight({
       title: 'Chainlink Functions Docs',
 
+      theme: {
+        default: 'light',
+      },
+
       sidebar: [
         {
           label: 'Chainlink Functions',
@@ -15,3 +19,6 @@ export default defineConfig({
           ],
         },
       ],
+    }),
+  ],
+});
