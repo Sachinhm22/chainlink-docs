@@ -19,6 +19,9 @@ export default defineConfig({
           ],
         },
       ],
+
+      // 🚨 THIS disables auto-generation completely
+      customCss: [],
     }),
   ],
 });
