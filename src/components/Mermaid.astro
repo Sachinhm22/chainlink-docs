@@ -1,0 +1,21 @@
+---
+import mermaid from "mermaid";
+
+const { chart } = Astro.props;
+
+if (typeof window !== "undefined") {
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "default",
+  });
+}
+---
+
+<div class="mermaid">
+  {chart}
+</div>
+
+<script>
+  import mermaid from "mermaid";
+  mermaid.run();
+</script>

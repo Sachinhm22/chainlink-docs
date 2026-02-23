@@ -1,0 +1,963 @@
+---
+title: "Chainlink Functions"
+description: "Complete developer guide for Chainlink Functions."
+---
+
+import Mermaid from "../../../components/Mermaid.astro"
+
+# Chainlink Functions – Complete Developer Guide (2026)
+> Chainlink Functions provides decentralized, verifiable off-chain compute for smart contracts.
+
+## Overview
+
+Chainlink Functions allows smart contracts to execute custom JavaScript in a decentralized oracle network (DON) and return a verifiable result on-chain.
+
+Unlike predefined data feeds, Functions is designed for programmable off-chain compute. Developers can:
+
+- Call arbitrary external APIs  
+- Perform custom computation  
+- Use encrypted secrets  
+- Receive cryptographically verified callbacks  
+
+The system follows an asynchronous request–response model secured by OCR consensus and on-chain signature verification.
+
+## Architecture
+
+Chainlink Functions operates across on-chain and off-chain components.
+
+### On-Chain Components
+
+- **Consumer Contract** — Initiates the request and receives the callback.
+- **FunctionsRouter** — Entry point for requests and subscription billing.
+- **FunctionsCoordinator** — Emits events and verifies DON reports.
+
+### Off-Chain Components
+
+- **Decentralized Oracle Network (DON)** — Executes JavaScript computation.
+- **OCR Protocol** — Aggregates node responses into a single attested result.
+- **Secrets Endpoint** — Securely distributes encrypted secrets to nodes.
+
+The system follows an asynchronous request–response model:
+1. Contract sends request.
+2. DON executes computation off-chain.
+3. Aggregated result is returned via callback.
+
+<Mermaid chart={`
+flowchart LR
+
+%% On-chain
+EOA[User / EOA]
+A[Consumer Contract]
+B[FunctionsRouter]
+C[FunctionsCoordinator]
+
+%% Off-chain
+S[Secrets Endpoint]
+D[DON Nodes]
+API[External APIs]
+T[Threshold Decryption]
+G[OCR Aggregation]
+
+%% Request flow
+EOA --> A
+A --> B
+B --> C
+
+%% Secrets
+A -->|Upload Secrets| S
+S --> D
+
+%% Oracle execution
+C -->|OracleRequest| D
+D -->|Sandboxed Execution| API
+API -->|API Response| D
+
+%% Aggregation
+D --> T
+T --> G
+G -->|Signed Report| C
+
+%% Callback
+C --> A
+`} />
+
+## Subscriptions & Billing Architecture
+
+Chainlink Functions uses a prepaid subscription model.  
+Consumer contracts **never hold LINK directly**.
+
+All billing flows through a `subscriptionId` managed by the `FunctionsRouter`.
+
+### Reservation Model
+
+When a request is sent:
+
+1. The Router simulates the maximum execution cost.
+2. LINK is locked as a **reservation**.
+3. The request is forwarded to the Coordinator.
+
+This introduces an important accounting concept:
+
+**Effective Balance = Subscription Balance – Reservation**
+
+- In-flight requests lock LINK.
+- Reserved LINK cannot be spent.
+- Multiple concurrent requests increase total reservation.
+
+If the effective balance is insufficient, the request is rejected before DON execution.
+
+---
+
+### Settlement Phase
+
+After DON consensus and report verification:
+
+1. The Router calculates the actual cost.
+2. Billing is finalized.
+3. Any difference between reserved and actual cost is released.
+4. The callback is invoked on the consumer contract.
+
+Billing therefore occurs in two phases:
+- Reservation at request time
+- Final settlement at fulfillment
+
+This protects node operators from underpayment and prevents subscription overdrafts.
+
+#### Timeout & Cancellation Model
+
+If a request is not fulfilled within approximately five minutes, it becomes eligible for manual timeout.
+
+Timeout behavior:
+
+- The reserved LINK is unlocked.
+- The request is marked as failed.
+- The subscription effective balance is restored.
+
+A subscription cannot be canceled if:
+
+- There are in-flight requests.
+- There are pending requests that have not timed out.
+
+This prevents users from withdrawing LINK while requests are still economically secured.
+
+## Request Lifecycle
+
+
+### 1. Consumer Contract Sends Request
+
+The smart contract calls `_sendRequest()` via the `FunctionsRouter`.
+
+The request is a fully self-contained execution specification.
+
+It defines:
+
+- Where the code is located (inline, remote, or DON-hosted)
+- Where secrets are referenced (remote URL or DON slot)
+- The JavaScript source to execute
+- Arguments (`args` and `bytesArgs`)
+- The target DON (`donID`)
+- The subscription used for billing
+- The maximum callback gas
+
+Once encoded, the request contains all information required for deterministic execution across the DON.
+
+No additional off-chain state is assumed.
+
+- Encoded request (CBOR)
+- Subscription ID
+- Gas limit
+- DON ID
+
+`donID` identifies the specific Decentralized Oracle Network responsible for execution.
+
+Properties:
+
+- Each blockchain network is associated with one or more DON instances.
+- The `donID` ensures the request is routed to the correct oracle network.
+- Secrets, threshold keys, and execution context are bound to a specific DON.
+- Using an incorrect `donID` results in execution failure or rejected requests.
+
+This parameter defines the execution domain of the request.
+
+This emits an on-chain event.
+
+---
+
+### 2. Router Forwards to Coordinator
+
+The `FunctionsRouter` acts as the economic and callback boundary of the system.
+
+When `_sendRequest()` is called:
+
+1. The Router verifies the subscription is valid and funded.
+2. It simulates the maximum execution cost.
+3. It locks LINK as a reservation.
+4. It records the request and passes execution context to the `FunctionsCoordinator`, which emits the `OracleRequest` event on-chain.
+
+The Router does not execute oracle logic.
+
+Its responsibilities are:
+
+- Subscription management  
+- Reservation accounting  
+- Billing settlement  
+- Callback invocation  
+
+The `FunctionsCoordinator` is the DON interface layer.
+
+It emits the `OracleRequest` event and receives the aggregated OCR report.
+
+The coordinator:
+
+- Assigns a unique `requestId`
+- Emits the `OracleRequest` event
+- Does not directly call DON nodes
+
+DON nodes monitor the blockchain for `OracleRequest` events.
+
+Upon detecting a valid event for their configured `donID`, they independently begin off-chain execution.
+
+Execution is event-driven, not contract-invoked.
+
+---
+
+### 3. DON Executes JavaScript Off-Chain
+
+The Decentralized Oracle Network:
+
+- Fetches external APIs
+- Executes JS in sandboxed runtime
+- Produces response or error
+
+Each node signs its result.
+
+---
+
+### 4. OCR Aggregation
+
+Off-Chain Reporting (OCR):
+
+- Aggregates node responses
+- Produces a single attested report
+- Signs report quorum
+
+---
+
+### 5. Coordinator Verifies Report
+
+On-chain verification:
+
+- Validates DON signatures
+- Confirms quorum threshold
+- Ensures request ID match
+
+---
+
+### 6. Fulfillment Callback
+
+After DON consensus is reached and the Coordinator verifies the OCR-attested report, the FunctionsRouter finalizes billing and invokes `handleOracleFulfillment()` on the consumer contract.
+
+At this stage, execution authority shifts back to the consumer contract.
+
+Only the `FunctionsRouter` is authorized to invoke the fulfillment entrypoint.  
+The consumer contract must validate the `requestId` and handle the response deterministically.
+
+If validation fails, the fulfillment reverts and the request is considered failed.
+
+```solidity
+function fulfillRequest(
+    bytes32 requestId,
+    bytes memory response,
+    bytes memory err
+) internal override
+```
+
+## Solidity Integration
+
+A minimal consumer contract must:
+
+- Inherit `FunctionsClient`
+- Store the last request ID
+- Override `fulfillRequest()`
+- Validate the request ID
+- Handle response or error
+
+### Minimal Consumer Example
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import {FunctionsClient} from "@chainlink/contracts/src/v0.8/functions/v1_0_0/FunctionsClient.sol";
+import {ConfirmedOwner} from "@chainlink/contracts/src/v0.8/shared/access/ConfirmedOwner.sol";
+
+contract MyFunctionsConsumer is FunctionsClient, ConfirmedOwner {
+
+    bytes32 public s_lastRequestId;
+    bytes public s_lastResponse;
+    bytes public s_lastError;
+
+    constructor(address router)
+        FunctionsClient(router)
+        ConfirmedOwner(msg.sender)
+    {}
+
+    function sendRequest(
+        bytes memory request,
+        uint64 subscriptionId,
+        uint32 gasLimit,
+        bytes32 donID
+    ) external onlyOwner returns (bytes32 requestId) {
+        s_lastRequestId = _sendRequest(
+            request,
+            subscriptionId,
+            gasLimit,
+            donID
+        );
+        return s_lastRequestId;
+    }
+
+        // Called by the FunctionsRouter after DON report verification
+    function handleOracleFulfillment(
+        bytes32 requestId,
+        bytes memory response,
+        bytes memory err
+    ) external override {
+
+        if (msg.sender != address(s_router)) {
+            revert OnlyRouterCanFulfill();
+        }
+
+        _fulfillRequest(requestId, response, err);
+    }
+
+    function _fulfillRequest(
+        bytes32 requestId,
+        bytes memory response,
+        bytes memory err
+    ) internal {
+
+        if (requestId != s_lastRequestId) {
+            revert("Unexpected request ID");
+        }
+
+        s_lastResponse = response;
+        s_lastError = err;
+    }
+
+        s_lastResponse = response;
+        s_lastError = err;
+    }
+}
+```
+
+### Critical Concepts
+
+- `_sendRequest()` emits the request event.
+- Chainlink Functions operates using an asynchronous request–response model.
+- `fulfillRequest()` is called later by the Router.
+- Always validate `requestId` to prevent replay or spoofed calls.
+
+## JavaScript Execution Model
+
+Chainlink Functions executes user-defined JavaScript off-chain inside a sandboxed runtime.
+
+The execution environment:
+
+- Runs inside the DON (Decentralized Oracle Network)
+- Uses a deterministic runtime (Deno-based)
+- Has strict CPU, memory, and time limits
+- Cannot access arbitrary local resources
+
+---
+
+### Inline Source Example
+
+```javascript
+const response = await Functions.makeHttpRequest({
+  url: "https://api.example.com/data"
+});
+
+if (!response || response.error) {
+  throw Error("API request failed");
+}
+
+return Functions.encodeUint256(response.data.value);
+```
+
+---
+
+### Execution Constraints
+
+- No persistent state between executions
+- Limited execution time
+- No filesystem access
+- Only whitelisted network calls
+- Deterministic output required for aggregation
+- Maximum response size is currently **512 bytes** (CRE runtime update). Larger responses revert during fulfillment.
+- The JavaScript runtime executes inside the Chainlink Runtime Environment (CRE) with a bounded execution window (~30 seconds under the current CRE runtime).
+- `callbackGasLimit` applies only to on-chain callback execution, not to off-chain JavaScript compute.
+- Off-chain compute is resource-bounded by the DON runtime, not EVM gas.
+
+---
+
+### Arguments & Secrets
+
+Functions supports:
+
+- `args` → string arguments passed from contract
+- `bytesArgs` → raw bytes inputs
+- DON-hosted encrypted secrets
+- Off-chain secret URLs
+
+Example usage:
+
+```javascript
+const userInput = args[0];
+const apiKey = secrets.apiKey;
+```
+
+Secrets are encrypted client-side and decrypted only inside the DON.
+
+### Secrets Lifecycle & Versioning
+
+Secrets are never transmitted in plaintext.
+
+They are referenced using:
+
+- `slotId` — identifies the DON-hosted secret slot  
+- `version` — specific revision of the secret  
+- `expirationTimeMinutes` — time-bound validity window  
+
+Properties:
+
+- Secrets are encrypted client-side before upload.
+- Secrets are tied to a specific `subscriptionId`.
+- Only the subscription owner can upload or rotate secrets.
+- The DON retrieves and decrypts secrets using threshold reconstruction.
+
+Operational implications:
+
+- Expired secrets result in execution failure.
+- Rotating secrets requires updating the version reference.
+- Multiple secret versions can coexist for controlled migration.
+- Remote-hosted secrets introduce additional trust surface.
+
+Secrets are referenced by pointer, never embedded directly in the request payload.
+
+---
+
+### Error Handling
+
+If the script throws:
+
+- The DON returns an aggregated error
+- `fulfillRequest()` receives `err`
+- `response` will be empty
+
+Contracts must handle both cases.
+
+## Security & Trust Model
+
+Chainlink Functions relies on decentralized execution, cryptographic aggregation, and on-chain verification to ensure trust-minimized computation.
+
+### 1. Decentralized Execution
+
+- Multiple DON nodes execute the same JavaScript independently.
+- No single node determines the final result.
+- Fault tolerance depends on the DON’s quorum threshold.
+- Malicious or faulty nodes cannot override consensus alone.
+
+---
+
+### 2. OCR-Based Aggregation
+
+- Each node signs its execution output.
+- Off-chain Reporting (OCR) aggregates signed results.
+- A report is produced only after quorum consensus is reached.
+- Diverging node outputs are excluded from final aggregation.
+
+### Double Aggregation Model
+
+Chainlink Functions performs aggregation at two distinct layers.
+
+
+#### 1. Script-Level Aggregation (Inside JavaScript)
+
+The developer may aggregate multiple data sources inside the execution script itself.
+
+These two layers solve different problems: your script decides what the correct value is, and the network decides whether that value can be trusted.
+
+Example patterns:
+- Median across multiple APIs
+- Weighted average
+- Custom deterministic normalization logic
+
+Because every DON node runs the same script, it must produce identical output across nodes.
+
+#### 2. Network-Level Aggregation (Across DON Nodes)
+
+After each node independently executes the script:
+
+- Each node signs its result.
+- OCR produces a cryptographically attested report.
+- A quorum of nodes must agree before a report is transmitted on-chain.
+
+These two layers serve different purposes:
+
+- Script-level aggregation handles data correctness.
+- Network-level aggregation enforces Byzantine fault tolerance.
+
+Both are required for production-grade correctness.
+
+### Byzantine Fault Tolerance & Threshold Model
+
+The DON follows a Byzantine fault tolerant model.
+
+Let:
+
+- **N** = total number of DON nodes  
+- **F** = maximum number of Byzantine (malicious or faulty) nodes tolerated  
+- **K** = threshold required to produce a valid report  
+
+The network must satisfy:
+
+The DON uses a configurable Byzantine fault tolerance threshold.
+
+In practice, most deployments follow:
+
+f = floor((n − 1) / 3)
+
+Where up to **f** faulty nodes can be tolerated while preserving safety and liveness.
+
+The exact reporting threshold is configured per DON and not fixed in public documentation.
+
+In practical terms:
+
+- The system continues operating even if up to **F** nodes are offline or malicious.
+- Fewer than **K** compromised nodes cannot forge a valid OCR report.
+- A sufficient quorum must cooperate before any result is transmitted on-chain.
+
+This guarantees both:
+
+- **Safety** — incorrect reports cannot be finalized.
+- **Liveness** — honest majority can continue producing reports.
+
+For encrypted secrets:
+
+- The Master Secret Key (MSK) is split into shares.
+- No single node can decrypt secrets independently.
+- At least **K** nodes must cooperate for reconstruction.
+
+Compromising fewer than **K** nodes does not expose secret material.
+
+---
+
+### 3. On-Chain Verification
+
+- The `FunctionsCoordinator` verifies report signatures.
+- Invalid or insufficient signatures are rejected.
+- Only verified reports trigger fulfillment.
+
+---
+
+### 4. Replay Protection
+
+- Consumer contracts validate the `requestId`.
+- Prevents spoofed fulfillments.
+- Prevents reuse of old signed reports.
+- Ensures each response corresponds to an active request.
+
+---
+
+### 5. Deterministic Execution Requirement
+
+All DON nodes must produce identical output given identical input.
+
+Determinism requirements:
+
+- No randomness (`Math.random`, non-deterministic seeds).
+- No time-dependent logic (`Date.now`, block timestamps).
+- No non-deterministic ordering (e.g., relying on object key iteration order).
+- No floating-point precision drift that could diverge across runtimes.
+- No external side effects (emails, webhooks, database writes).
+
+Each node executes the script independently inside an isolated runtime.
+
+If outputs diverge:
+
+- OCR consensus fails.
+- No report is produced.
+- The request may eventually timeout.
+
+In practice, execution should behave like a pure function:
+
+- No side effects  
+- Same input always produces the same output  
+- Safe to execute multiple times without changing external state
+
+---
+
+### 6. Billing & Gas Controls
+
+- Requests are billed via subscription balance.
+- Gas limits cap callback execution cost.
+- Execution time and memory limits protect node infrastructure.
+- Insufficient balance or excessive gas usage causes request failure.
+
+## Failure Modes & Attack Scenarios
+
+Understanding how requests can fail is critical for production deployments.
+
+### 1. Non-Deterministic Execution
+
+Non-deterministic logic is the most common integration error.
+
+Randomness, time-dependent values (Date.now()), or inconsistent API responses can cause nodes to compute different outputs. When results diverge, OCR cannot reach consensus and no report is transmitted.
+---
+
+### 2. Insufficient Subscription Balance
+
+If the subscription balance (after reservation) is too low, the Router rejects the request before it reaches the DON.
+
+Even if a request is accepted, excessive callback gas usage can deplete funds and prevent fulfillment.
+
+Monitor effective balance, not just total balance.
+
+---
+
+### 3. Callback Gas Exhaustion
+
+If callbackGasLimit is set too low, the fulfillment transaction reverts even though the DON successfully computed a result.
+
+Off-chain execution may succeed while the on-chain callback fails.
+
+Always estimate callback cost in staging before deploying to mainnet.
+
+---
+
+### 4. Spoofed Fulfillment Attempt
+
+If a contract does not restrict the caller of handleOracleFulfillment, a malicious contract could attempt to inject fake responses.
+
+The Router-only check and requestId validation prevent this.
+
+Never remove or bypass these safeguards.
+
+---
+
+### 5. API-Level Failures
+
+Each DON node calls external APIs independently. If an API is rate-limited or unstable, execution may fail intermittently.
+
+Design integrations assuming:
+
+- Parallel requests
+
+- Timeout risk
+
+- Inconsistent external infrastructure
+
+External APIs are often the weakest reliability link.
+
+---
+
+### 6. Secrets Misconfiguration
+
+Incorrect encryption, expired secrets, or mismatched slotId / version references cause execution failure before aggregation.
+
+Secrets are tied to the subscription and DON context. Rotation must update version references explicitly.
+
+## Best Practices
+
+Production-grade Chainlink Functions integration requires defensive design.
+
+---
+
+### 1. Always Validate `requestId`
+
+```solidity
+if (requestId != s_lastRequestId) {
+    revert("Unexpected request ID");
+}
+```
+
+Never trust callbacks blindly.
+
+---
+
+### 2. Set Proper Gas Limits
+
+- Underestimate → callback fails.
+- Overestimate → wasted funds.
+
+Test execution cost in staging before mainnet.
+
+---
+
+### 3. Handle Errors Explicitly
+
+Inside `fulfillRequest()`:
+
+- Check if `err.length > 0`
+- Do not assume response is valid
+- Log or emit events for debugging
+
+---
+
+### 4. Use Deterministic JavaScript
+
+Avoid:
+
+- Randomness
+- Non-deterministic APIs
+- Time-based logic
+
+OCR requires consistent results across nodes.
+
+---
+
+### 5. Secure Secrets Properly
+
+- Encrypt client-side
+- Prefer DON-hosted secrets
+- Never hardcode API keys
+
+---
+
+### 6. Monitor Subscription Balance
+
+Low balance → request rejection.
+
+Implement:
+
+- Off-chain monitoring
+- Automated refill scripts
+
+---
+
+### 7. Emit Diagnostic Events
+
+Emit events in `fulfillRequest()`:
+
+```solidity
+event RequestFulfilled(bytes32 requestId, bytes response, bytes err);
+```
+
+Improves observability and debugging.
+
+## Real-World Use Cases (2026)
+
+Below are patterns where decentralized off-chain compute becomes necessary rather than optional.
+
+### 1. DeFi Dynamic Pricing
+
+Fetch multiple external market sources, compute a deterministic median or weighted value inside the script, and return a verified price to on-chain lending or derivatives logic.
+
+This reduces reliance on a single API and allows protocol-specific pricing models.
+
+---
+
+### 2. AI Oracle Integration
+
+Call an external AI model, transform the inference result into a compact deterministic format, and return it on-chain for automated decision logic.
+
+The script layer controls preprocessing and normalization, while the DON ensures the result cannot be spoofed.
+
+---
+
+### 3. Cross-Chain Data Normalization
+
+Pull data from multiple chains or indexing services, normalize it into a single deterministic structure, and return a canonical value for settlement or validation.
+
+This allows cross-chain logic without embedding complex parsing directly into smart contracts.
+
+---
+
+### 4. Real-World Event Verification
+
+Fetch compliance data, KYC status, or off-chain event confirmations and convert them into a minimal on-chain signal.
+
+The contract receives a verified binary or structured response rather than raw API output.
+
+---
+
+### 5. Automated Treasury Logic
+
+Query off-chain accounting systems, calculate thresholds or balance conditions inside the script, and return a simple execution signal.
+
+This keeps complex financial logic off-chain while preserving verifiable execution.
+
+---
+
+Why Functions over traditional oracles?
+
+- Custom logic execution
+- API flexibility
+- Off-chain compute at scale
+- Decentralized attestation
+
+## Common Pitfalls
+
+Even correct integrations can fail due to configuration or execution constraints.
+
+---
+
+### 1. Insufficient Callback Gas
+
+Symptom:
+- `fulfillRequest()` never updates state
+- Transaction reverts
+
+Cause:
+- `gasLimit` too low
+
+Fix:
+- Increase callback gas limit
+- Estimate cost during testing
+
+---
+
+### 2. Subscription Not Funded
+
+Symptom:
+- Request rejected
+- Router validation failure
+
+Cause:
+- Low subscription balance
+
+Fix:
+- Monitor balance
+- Maintain buffer for in-flight requests
+
+---
+
+### 3. API Rate Limits
+
+Symptom:
+- Intermittent execution failures
+- Aggregated errors
+
+Cause:
+- Each DON node calls the API independently
+
+Fix:
+- Use rate-limit-friendly APIs
+- Implement API caching layer
+
+---
+
+### 4. Non-Deterministic JavaScript
+
+Symptom:
+- Aggregation failure
+- Consensus mismatch
+
+Cause:
+- Random values
+- Time-dependent logic
+
+Fix:
+- Ensure deterministic output across nodes
+
+---
+
+### 5. Ignoring `err` Parameter
+
+Symptom:
+- Silent failures
+- Corrupted state assumptions
+
+Fix:
+- Always check `err.length`
+- Emit diagnostic events
+
+---
+
+### 6. Missing Request ID Validation
+
+Symptom:
+- Vulnerable callback logic
+- Potential spoofed fulfillment
+
+Fix:
+- Compare `requestId` with stored value
+- Reject unexpected callbacks
+
+## Troubleshooting
+
+When a Chainlink Functions request fails, isolate the failure layer.
+
+---
+
+### Step 1 — Did the Transaction Succeed?
+
+- If `sendRequest()` reverted → check subscription balance or parameters.
+- If transaction succeeded → move to fulfillment stage.
+
+---
+
+### Step 2 — Was Callback Executed?
+
+If no state update occurred:
+
+- Check callback gas limit.
+- Confirm `fulfillRequest()` does not revert.
+- Verify correct Router address.
+
+---
+
+### Step 3 — Was `err` Returned?
+
+Inside `fulfillRequest()`:
+
+```solidity
+if (err.length > 0) {
+    // Execution error
+}
+```
+
+Common causes:
+- API returned error
+- Timeout
+- Non-deterministic script
+- Secrets misconfiguration
+
+---
+
+### Step 4 — Aggregation Failure
+
+If no fulfillment occurs:
+
+- Ensure deterministic JavaScript
+- Avoid random logic
+- Check API rate limits
+
+---
+
+### Decision Flow
+
+Use this flow to quickly diagnose common execution and fulfillment issues in Chainlink Functions integrations.
+
+<Mermaid chart={`
+flowchart TD
+
+A([Request Sent]) --> B{Transaction Reverted?}
+
+B -- Yes --> C[Check Subscription<br/>Check Parameters]
+B -- No --> D{Callback Executed?}
+
+D -- No --> E[Check Gas Limit<br/>Check Router Address]
+D -- Yes --> F{Error Returned?}
+
+F -- Yes --> G[Inspect JS Logic<br/>Check API Response<br/>Verify Secrets]
+F -- No --> H([Execution Successful])
+
+%% Style Improvements
+classDef success fill:#1e293b,color:#fff,stroke:#334155
+class H success
+
+`} />
+
+---
