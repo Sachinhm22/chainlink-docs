@@ -7,10 +7,12 @@ export default defineConfig({
     starlight({
       title: 'Chainlink Functions Docs',
 
-      theme: {
+      // ✅ Force light mode as default
+      appearance: {
         default: 'light',
       },
 
+      // ✅ Clean sidebar (no architecture page)
       sidebar: [
         {
           label: 'Chainlink Functions',
@@ -20,8 +22,14 @@ export default defineConfig({
         },
       ],
 
-      // 🚨 THIS disables auto-generation completely
-      customCss: [],
+      // Optional: GitHub link (edit if needed)
+      social: [
+        {
+          icon: 'github',
+          label: 'GitHub',
+          href: 'https://github.com/Sachinhm22/chainlink-docs',
+        },
+      ],
     }),
   ],
 });
